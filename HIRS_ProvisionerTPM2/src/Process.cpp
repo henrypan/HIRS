@@ -3,8 +3,11 @@
  */
 #include <Process.h>
 #include <Logger.h>
+#include <HirsRuntimeException.h>
+#include <Utils.h>
 
 #include <arpa/inet.h>
+#include <dirent.h>
 
 #include <cstdio>
 #include <cerrno>
@@ -14,17 +17,25 @@
 #include <iostream>
 #include <string>
 #include <utility>
-#include <HirsRuntimeException.h>
 
 using hirs::exception::HirsRuntimeException;
 using hirs::log::Logger;
 using hirs::utils::Process;
+using hirs::file_utils::dirExists;
+using hirs::file_utils::fileExists;
+using hirs::file_utils::fileToString;
 using std::cerr;
 using std::endl;
 using std::stringstream;
 using std::string;
+using std::strtol;
+using std::to_string;
 
 const Logger Process::LOGGER = Logger::getDefaultLogger();
+
+const char* const Process::kProcessDirectory = "/proc";
+const char* const Process::kCmdlineFilename = "cmdline";
+const char* const Process::kStatFilename = "stat";
 
 /**
  * Constructor.
@@ -130,4 +141,69 @@ string Process::run(const string& executable,
         str.erase(str.length() - 1);
     }
     return str;
+}
+
+/**
+ * Static function to check if a specified process is currently running in the
+ * local environment.
+ *
+ * @param executable the executable to check is running
+ * @param checkCmdline a flag to check the complete cmdline commands
+ *  rather than just search for the process name, default false
+ * @return true, if executable is found to be running / false, otherwise
+ */
+bool Process::isRunning(const string& executable, bool checkCmdline) {
+    // If the executable is the empty string, return false
+    if (executable.empty()) {
+        return false;
+    }
+
+    DIR* processDir;
+    if (!dirExists(kProcessDirectory)) {
+        stringstream errorStream;
+        errorStream << "The " << kProcessDirectory
+                    << " directory could not be found. "
+                    << "Please ensure this is running "
+                    << "on a supported Unix environment.";
+        throw HirsRuntimeException(errorStream.str(), "Process::isRunning");
+    } else {
+        processDir = opendir(kProcessDirectory);
+    }
+
+    struct dirent* entry;
+    char* endptr;
+    while ((entry = readdir(processDir)) != nullptr) {
+        // Attempt to parse current directory entry into a PID
+        int64_t pid = strtol(entry->d_name, &endptr, 10);
+        // Current entry can be skipped since it wasn't purely numeric
+        if (*endptr != '\0') {
+            continue;
+        }
+
+        // Check current process for desired executable
+        stringstream filename;
+        filename << kProcessDirectory << "/"
+                 << to_string(pid) << "/";
+        if (checkCmdline) {
+            filename << kCmdlineFilename;
+        } else {
+            filename << kStatFilename;
+        }
+        string cmd;
+        try {
+            cmd = fileToString(filename.str());
+        } catch (HirsRuntimeException& hirsRuntimeException) {
+            // Process terminated between parsing the PID
+            // and reading its stat file. Can skip as a result.
+            continue;
+        }
+        // Desired executable was found, so it's running, return true
+        if (cmd.find(executable) != string::npos) {
+            closedir(processDir);
+            return true;
+        }
+    }
+    // The target executable is not a running process, return false
+    closedir(processDir);
+    return false;
 }
